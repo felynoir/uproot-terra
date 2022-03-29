@@ -1,7 +1,9 @@
 import sys
 import json
 import base64
+from tracemalloc import start
 import pandas as pd
+import os
 
 from concurrent.futures import as_completed
 from requests_futures.sessions import FuturesSession
@@ -12,16 +14,44 @@ from proto import query_pb2
 
 x = query_pb2.QueryContractStoreRequest()
 
-# TODO: change params below
-x.contract_address = "terra1xacqx447msqp46qmv8k2sq6v5jh9fdj37az898"
-msg = {"state": {}}
-start_block = 6070000
-end_block = 6070100
-api_key = ""
-x.query_msg = json.dumps(msg).encode("utf-8")
+# NOTE: env setup
+api_key = os.getenv("DATAHUB_API_KEY")
 
-session = FuturesSession(max_workers=5)
+# TODO: change params below
+file_path = "csv/states.csv"
+max_workers = 100
 retries = 5
+x.contract_address = "terra1xacqx447msqp46qmv8k2sq6v5jh9fdj37az898" # contract addr
+msg = {"state": {}} # query msg
+start_block = 6070000 # start block archival
+end_block = 6090000 # # end block archival
+
+# CLI
+# python <this_file> [-r]
+# -r to reset file
+if '-r' in sys.argv:
+    if os.path.exists(file_path):
+        os.remove(file_path)
+        print('remove file success.')
+    else:
+        print('no file exits.')
+
+
+datas = pd.DataFrame()
+# if file exist continue from last time
+if os.path.exists(file_path):
+    datas = pd.read_csv(file_path, index_col=False)
+    start_block = datas['height'].max() + 1 
+    # print([tuple(x) for x in datas.values])
+
+def save_file():
+    pd.DataFrame(datas).sort_values('height').to_csv(
+            open(file_path, "w"),  index=False
+    )
+
+# setup
+x.query_msg = json.dumps(msg).encode("utf-8")
+session = FuturesSession(max_workers=max_workers)
 status_forcelist = [429]
 retry = Retry(
     total=retries,
@@ -35,9 +65,7 @@ session.mount("http://", adapter)
 session.mount("https://", adapter)
 
 import time
-
 start_time = time.time()
-datas = []
 done = 0
 
 futures = []
@@ -57,7 +85,7 @@ for future in as_completed(futures):
     res = res.json()
     value = res["result"]["response"]["value"]
 
-    # TODO: just do a workaround
+    # TODO: workaound remove special character
     idx = 0
     while idx < len(value):
         try:
@@ -69,14 +97,21 @@ for future in as_completed(futures):
     # TODO: change by response type
     decoded_val = json.loads(decoded_val)["state"]
     decoded_val["height"] = future.height
-    datas.append(decoded_val)
+
+    datas = datas.append(decoded_val, ignore_index=True)
+    # workaround pd auto convert to float
+    datas['height'] = datas['height'].astype(int)
 
     # progress stuff
     done += 1
-    sys.stdout.write("\r[%s%s] " % ("=" * done, " " * (end_block - done - start_block)))
+    percent = done / (end_block-start_block) * 100
+    sys.stdout.write("\r[%s%s] " % ("=" * int(percent), " " * int(100-percent)))
     sys.stdout.flush()
+    if done%1000 == 0:
+        save_file()
 
-pd.DataFrame(datas).sort_values("height").to_csv(
-    open("csv/lunax_states.csv", "w"), index=False
-)
+
+save_file()
+
 print("\n--- %s seconds ---" % (time.time() - start_time))
+
